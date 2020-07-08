@@ -20,12 +20,13 @@ package resources
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+
 	"github.com/Azure/go-autorest/autorest"
 	"github.com/Azure/go-autorest/autorest/azure"
 	"github.com/Azure/go-autorest/autorest/date"
 	"github.com/Azure/go-autorest/autorest/to"
 	"github.com/Azure/go-autorest/tracing"
-	"net/http"
 )
 
 // The package's fully qualified name.
@@ -1158,12 +1159,18 @@ func (iter *ListResultIterator) NextWithContext(ctx context.Context) (err error)
 	if iter.i < len(iter.page.Values()) {
 		return nil
 	}
+	// if we got here, we are out of values on the current page
 	err = iter.page.NextWithContext(ctx)
+	// if this page is empty, go to the next page
+	for err == nil && iter.page.lr.IsEmpty() && iter.anotherPageAvailable() {
+		err = iter.page.NextWithContext(ctx)
+	}
 	if err != nil {
 		iter.i--
 		return err
 	}
 	iter.i = 0
+
 	return nil
 }
 
@@ -1176,7 +1183,8 @@ func (iter *ListResultIterator) Next() error {
 
 // NotDone returns true if the enumeration should be started or is not yet complete.
 func (iter ListResultIterator) NotDone() bool {
-	return iter.page.NotDone() && iter.i < len(iter.page.Values())
+	// if the page is not empty AND we have not finished the page OR if there is a next page available, we are not done
+	return (iter.page.NotDone() && iter.i < len(iter.page.Values())) || iter.anotherPageAvailable()
 }
 
 // Response returns the raw server response from the last page request.
@@ -1187,7 +1195,9 @@ func (iter ListResultIterator) Response() ListResult {
 // Value returns the current value or a zero-initialized value if the
 // iterator has advanced beyond the end of the collection.
 func (iter ListResultIterator) Value() GenericResourceExpanded {
-	if !iter.page.NotDone() {
+	// if the page is empty or we have already used all the values available,
+	// return the empty generic value
+	if iter.page.lr.IsEmpty() || iter.i >= len(iter.page.Values()) {
 		return GenericResourceExpanded{}
 	}
 	return iter.page.Values()[iter.i]
@@ -1196,6 +1206,14 @@ func (iter ListResultIterator) Value() GenericResourceExpanded {
 // Creates a new instance of the ListResultIterator type.
 func NewListResultIterator(page ListResultPage) ListResultIterator {
 	return ListResultIterator{page: page}
+}
+
+// PMC-added function to ensure we do not get a nil pointer when we see an empty value.
+// This and the other changes in this changelist are all essential and must be retained
+// until/if Azure ever fixes the Azure SDK issue with empty page handling
+// IsEmpty returns true if the ListResultIterator contains no values.
+func (iter ListResultIterator) IsEmpty() bool {
+	return iter.page.lr.IsEmpty()
 }
 
 // IsEmpty returns true if the ListResult contains no values.
@@ -1219,6 +1237,11 @@ func (lr ListResult) listResultPreparer(ctx context.Context) (*http.Request, err
 type ListResultPage struct {
 	fn func(context.Context, ListResult) (ListResult, error)
 	lr ListResult
+}
+
+// is there a next page available?
+func (iter ListResultIterator) anotherPageAvailable() bool {
+	return iter.page.lr.NextLink != nil && len(to.String(iter.page.lr.NextLink)) > 0
 }
 
 // NextWithContext advances to the next page of values.  If there was an error making
